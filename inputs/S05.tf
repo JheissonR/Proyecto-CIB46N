@@ -1,0 +1,8 @@
+resource "aws_ebs_volume" "data" {
+  availability_zone = "us-east-1a"
+  size              = 20
+  type              = "gp3"
+  tags = {
+    Name = "migraiac-ebs-s05"
+  }
+}

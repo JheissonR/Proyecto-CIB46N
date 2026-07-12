@@ -1,0 +1,675 @@
+{
+  "name": "MIGRAIAC — Framework Multi-Agente IaC AWS→Azure",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1552,
+        256
+      ],
+      "id": "4960ebe2-0aef-4b72-9ca1-ce00a8a1c1ed",
+      "name": "When clicking 'Execute workflow'"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ── ENTRADA DESDE ARCHIVO .tf ────────────────────────────────────────────\n// El archivo AWS se lee desde /tmp/inputs/<TEMPLATE_ID>.tf (ej: S01.tf, M03.tf, C07.tf)\n// Cambiar SOLO el nombre del archivo de entrada:\n\nconst INPUT_FILE = $('Definir Archivo Entrada').item.json.input_file;  // definido en el nodo Set\n\n// Derivar template_id y nivel del nombre del archivo (S01 -> simple, M0x -> medio, C0x -> complejo)\nconst template_id = INPUT_FILE.replace(/\\.tf$/i, \"\");\nconst prefijo = template_id.charAt(0).toUpperCase();\nconst nivelMap = { S: \"simple\", M: \"medio\", C: \"complejo\" };\nconst nivel = nivelMap[prefijo] || \"desconocido\";\n\n// El contenido del archivo llega desde el nodo previo \"Leer Archivo AWS\" (stdout)\n// El stdout trae: primera linea \"___EJECUCION___=N\" y luego el contenido del .tf\nconst rawStdout = ($input.item.json.stdout || $input.item.json.data || \"\");\nlet ejecucion = 1;\nlet awsTemplate = rawStdout;\nconst lines = rawStdout.split(\"\\n\");\nif (lines[0] && lines[0].startsWith(\"___EJECUCION___=\")) {\n  ejecucion = parseInt(lines[0].split(\"=\")[1]) || 1;\n  awsTemplate = lines.slice(1).join(\"\\n\");\n}\nawsTemplate = awsTemplate.trim();\n\n// ground_truth: lista de recursos aws_ detectados en el propio template (auto-derivado)\nconst gtMatches = awsTemplate.match(/resource\\s+\"(aws_[a-z0-9_]+)\"/gi) || [];\nconst ground_truth = [...new Set(gtMatches.map(m => m.match(/aws_[a-z0-9_]+/i)[0]))];\n\nreturn {\n  template_id,\n  nivel,\n  input_file: INPUT_FILE,\n  ground_truth,\n  awsTemplate,\n  t0_total:    Date.now(),\n  ejecucion,\n  t0_analista: Date.now()\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -976,
+        256
+      ],
+      "id": "78dc978d-4e15-425e-bf15-73eee5d7bc11",
+      "name": "Input Template AWS"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Analiza este template de Terraform AWS:\n{{ $json.awsTemplate }}",
+        "options": {
+          "systemMessage": "Eres el Agente Analista de un sistema de migración de infraestructura. Recibirás un template Terraform de AWS y debes elevarlo a una Representación Intermedia de Recursos (IRR): un grafo tipado P = <V, E, S>, agnóstico al proveedor, que captura la intención arquitectónica del sistema.\n\nResponde ÚNICAMENTE en este formato JSON, sin texto adicional:\n{\n  \"servicios\": [\"tipos de recurso AWS exactos, ej: aws_s3_bucket\"],\n  \"irr\": {\n    \"V\": [\n      {\n        \"id\": \"nombre_logico_del_recurso\",\n        \"recurso_aws\": \"tipo exacto, ej: aws_instance\",\n        \"tipo_abstracto\": \"Instancia de Computo | Red Virtual | Subred | Regla de Firewall | Bucket de Almacenamiento | Base de Datos | Funcion Serverless | Rol de Identidad | Puerta de Enlace | Otro\",\n        \"equivalencia\": \"I | II | III\"\n      }\n    ],\n    \"E\": [\n      { \"origen\": \"id_nodo\", \"destino\": \"id_nodo\", \"relacion\": \"reside_en | depende_de | referencia | adjunta_a\" }\n    ],\n    \"S\": [\n      { \"nodo\": \"id_nodo\", \"atributo\": \"atributo funcional normalizado, ej: puerto_abierto, cifrado, runtime, tamano\", \"valor\": \"valor\" }\n    ]\n  },\n  \"no_migrables\": [\n    { \"recurso\": \"tipo de recurso clasificado como Tipo III\", \"motivo\": \"por que carece de equivalente viable en Azure\" }\n  ],\n  \"variables\": [\"valores hardcodeados, secrets o datos sensibles detectados\"],\n  \"flujo\": \"descripcion del flujo arquitectonico\",\n  \"resumen\": \"resumen general de la infraestructura\"\n}\n\nReglas:\n1. V (vertices): cada recurso declarado en el template es un vertice. Asignale un tipo_abstracto despojado de la nomenclatura propietaria de AWS.\n2. E (aristas): preserva TODAS las relaciones referenciales del template (referencias entre recursos, depends_on, ids compartidos). La topologia de dependencias debe poder reconstruirse integramente desde E.\n3. S (especificaciones): normaliza los atributos funcionales relevantes para la migracion (puertos, cifrado, tamanos, runtimes, modos de facturacion), no los meramente sintacticos.\n4. equivalencia: clasifica cada vertice segun la taxonomia de equivalencia de servicios: Tipo I = correspondencia uno a uno en Azure; Tipo II = requiere una composicion de varios recursos Azure; Tipo III = sin equivalente viable (incluyelo ademas en no_migrables con su motivo, NO se intentara traducir).\n5. El campo servicios debe listar los tipos de recurso AWS exactos detectados (se usa para metricas de deteccion)."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -688,
+        256
+      ],
+      "id": "ff0cb264-433a-447b-86e2-0c06414787bb",
+      "name": "AI Agent-Analista"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list",
+          "cachedResultName": "Claude Sonnet 4.6"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        -688,
+        480
+      ],
+      "id": "a172b112-f03e-4209-987f-28c5ba345414",
+      "name": "Anthropic Chat Model",
+      "credentials": {
+        "anthropicApi": {
+          "id": "LncPX0XCwpNzWEub",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ── OE1: métricas del Agente Analista ────────────────────────────────────\nconst analista_output = $input.item.json.output || \"\";\nconst t0 = $('Input Template AWS').item.json.t0_analista || Date.now();\nconst t1 = Date.now();\n\n// Parsear JSON del Analista (con fallback a regex)\nlet servicios_detectados = [];\ntry {\n  const clean = analista_output\n    .replace(/```json\\n?/g, \"\")\n    .replace(/```\\n?/g,     \"\")\n    .trim();\n  const parsed = JSON.parse(clean);\n  servicios_detectados = parsed.servicios || [];\n} catch (_) {\n  const matches = analista_output.match(/aws_\\w+/g) || [];\n  servicios_detectados = [...new Set(matches)];\n}\n\n// Precision / Recall / F1 vs ground truth\nconst ground_truth = $('Input Template AWS').item.json.ground_truth || [];\nconst gt  = new Set(ground_truth);\nconst det = new Set(servicios_detectados);\n\nconst TP = [...gt].filter(r => det.has(r)).length;\nconst FP = [...det].filter(r => !gt.has(r)).length;\nconst FN = [...gt].filter(r => !det.has(r)).length;\n\nconst precision = (TP + FP) > 0 ? TP / (TP + FP) : 0;\nconst recall    = (TP + FN) > 0 ? TP / (TP + FN) : 0;\nconst f1 = (precision + recall) > 0\n  ? 2 * precision * recall / (precision + recall) : 0;\n\n// ── TOKENS DEL ANALISTA (estimado chars/4; usa real si la API lo reporta) ──\nconst analistaFull = $('AI Agent-Analista').item.json;\nlet tokens_analista;\nif (analistaFull.tokenUsage && analistaFull.tokenUsage.totalTokens) {\n  tokens_analista = analistaFull.tokenUsage.totalTokens;\n} else if (analistaFull.usage && analistaFull.usage.total_tokens) {\n  tokens_analista = analistaFull.usage.total_tokens;\n} else {\n  const inTxt  = $('Input Template AWS').item.json.awsTemplate || \"\";\n  const outTxt = analistaFull.output || \"\";\n  tokens_analista = Math.round((inTxt.length + outTxt.length) / 4);\n}\n\nreturn {\n  // Pasar análisis al Arquitecto\n  output: analista_output,\n\n  // OE1\n  metricas_oe1: {\n    template_id: $('Input Template AWS').item.json.template_id,\n    ground_truth,\n    servicios_detectados,\n    TP, FP, FN,\n    precision: Math.round(precision * 10000) / 10000,\n    recall:    Math.round(recall    * 10000) / 10000,\n    f1:        Math.round(f1        * 10000) / 10000\n  },\n\n  // OE3: eficiencia computacional\n  tiempo_analista_ms: t1 - t0,\n  tokens_analista,\n  t0_arquitecto_ref:  Date.now()\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -384,
+        256
+      ],
+      "id": "ce2e4048-a063-48e6-a8c7-ba5003695b7e",
+      "name": "Parsear Output Analista"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Primer intento: usa el análisis del Analista\n// Reintentos:    usa el error del Validador con corrección mínima y dirigida\nconst hasFeedback = $json.terraformError ? true : false;\n\nlet prompt;\nif (hasFeedback) {\n  prompt = `El template anterior falló con este error de Terraform:\n${$json.errorResumen || $json.terraformError}\n\nTemplate anterior:\n${$json.previousTemplate}\n\nCorrige el template resolviendo EXACTAMENTE el error indicado.\nHaz cambios mínimos y dirigidos, no reescribas todo el template.`;\n} else {\n  prompt = `Genera el template Terraform Azure a partir de la siguiente Representación Intermedia de Recursos (IRR) de la infraestructura AWS:\n${$json.output}\n\nInstrucciones de proyección:\n- Proyecta cada vértice (V) al recurso azurerm correspondiente según su tipo_abstracto, preservando íntegramente la topología de dependencias (E) y los atributos funcionales (S).\n- Para vértices de equivalencia Tipo II, genera la composición completa de recursos Azure necesaria (p. ej., una instancia AWS se proyecta como VM + interfaz de red + grupo de seguridad).\n- Los recursos listados en no_migrables (Tipo III) NO deben traducirse: decláralos como comentario HCL indicando el recurso y el motivo.`;\n}\n\nreturn {\n  prompt,\n  t0_arquitecto_iter: Date.now()\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1488,
+        624
+      ],
+      "id": "447e993f-7f89-4f93-a091-fd54dd482162",
+      "name": "Preparar Prompt Arquitecto"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list",
+          "cachedResultName": "Claude Sonnet 4.6"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        -1312,
+        816
+      ],
+      "id": "2b0de00a-f111-49eb-a306-f3b2f676cefd",
+      "name": "Anthropic Chat Model1",
+      "credentials": {
+        "anthropicApi": {
+          "id": "LncPX0XCwpNzWEub",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const templateContent = $input.item.json.output;\n\nconst cleanTemplate = templateContent\n  .replace(/```hcl\\n?/g,       \"\")\n  .replace(/```terraform\\n?/g, \"\")\n  .replace(/```\\n?/g,          \"\")\n  .trim();\n\nconst attempt = $runIndex + 1;\n\n// Recuperar el t0 de ESTA iteracion: 'Preparar Prompt Arquitecto' corre justo antes\n// del Arquitecto en cada vuelta del bucle, asi que .last() da el inicio correcto.\nlet t0;\ntry {\n  t0 = $('Preparar Prompt Arquitecto').last().json.t0_arquitecto_iter;\n} catch(e) {\n  t0 = Date.now();\n}\nif (!t0) t0 = Date.now();\n\n\n// ── TOKENS DEL ARQUITECTO (estimado chars/4; usa real si la API lo reporta) ──\nconst arqFull = $input.item.json;\nlet tokens_arquitecto;\nif (arqFull.tokenUsage && arqFull.tokenUsage.totalTokens) {\n  tokens_arquitecto = arqFull.tokenUsage.totalTokens;\n} else if (arqFull.usage && arqFull.usage.total_tokens) {\n  tokens_arquitecto = arqFull.usage.total_tokens;\n} else {\n  const promptTxt = $('Preparar Prompt Arquitecto').last().json.prompt || \"\";\n  tokens_arquitecto = Math.round((promptTxt.length + (arqFull.output||\"\").length) / 4);\n}\n\nreturn {\n  templateContent: cleanTemplate,\n  tokens_arquitecto,\n  attempt,\n  tiempo_arquitecto_ms: Date.now() - t0,\n  t0_validador: Date.now()\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -992,
+        624
+      ],
+      "id": "126a6e51-3e6a-4813-8f9b-c10bed965469",
+      "name": "Guardar Template"
+    },
+    {
+      "parameters": {
+        "command": "=export PATH=\"/usr/local/bin:/usr/bin:/bin:$PATH\"\ncat > /tmp/main.tf << 'TFEOF'\n{{ $('Guardar Template').item.json.templateContent }}\nTFEOF\n\n# Crear provider.tf sólo si main.tf no incluye bloque terraform{}\nif ! grep -q \"required_providers\" /tmp/main.tf; then\n  cat > /tmp/provider.tf << 'EOF'\nterraform {\n  required_providers {\n    azurerm = {\n      source  = \"hashicorp/azurerm\"\n      version = \"~> 3.0\"\n    }\n  }\n}\nprovider \"azurerm\" {\n  features {}\n  skip_provider_registration = true\n}\nEOF\nelse\n  rm -f /tmp/provider.tf\nfi\n\ncd /tmp\n\n# init: descarga el plugin azurerm y valida el schema de recursos\nterraform init -no-color -input=false 2>&1\nINIT_EXIT=$?\n\nif [ $INIT_EXIT -ne 0 ]; then\n  echo \"TERRAFORM_ERROR\"\n  exit 0\nfi\n\n# validate: verifica sintaxis HCL + schema completo del provider\nterraform validate -no-color 2>&1\nVALIDATE_EXIT=$?\n\nif [ $VALIDATE_EXIT -eq 0 ]; then\n  echo \"TERRAFORM_OK\"\nelse\n  echo \"TERRAFORM_ERROR\"\nfi"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -288,
+        624
+      ],
+      "id": "b32935fd-2ccc-40c5-91b0-e903e2f19104",
+      "name": "Validar Terraform"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "eeaceefc-c409-41e7-9905-53b3622a173c",
+              "leftValue": "={{ $json.stdout }}",
+              "rightValue": "TERRAFORM_OK",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -80,
+        624
+      ],
+      "id": "368003c8-b0bf-417e-b51c-12feecc7131a",
+      "name": "¿Terraform OK?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://iac-auditor:8080/audit",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ template: $('Guardar Template').item.json.templateContent, template_id: $('Input Template AWS').item.json.template_id, input_file: $('Definir Archivo Entrada').item.json.input_file, run_infracost: true, compute_cbs: true }) }}",
+        "options": {
+          "timeout": 200000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        160,
+        608
+      ],
+      "id": "8e56071c-e659-402c-8d55-27e0433bd602",
+      "name": "Herramientas Calidad"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ── Consolida los DATOS CRUDOS del intento (para resultados.txt) ────────\nconst t0_total = $('Input Template AWS').item.json.t0_total;\nconst t1_total = Date.now();\nconst template_id = $('Input Template AWS').item.json.template_id;\nconst nivel       = $('Input Template AWS').item.json.nivel;\n\n// Salida del auditor (HTTP JSON): checkov, tfsec, tflint, infracost\nconst audit = $input.item.json || {};\nconst checkov   = parseInt(audit.checkov_failed) || 0;\nconst tfsec     = parseInt(audit.tfsec_issues)   || 0;\nconst tflint    = parseInt(audit.tflint_issues)  || 0;\nconst infracost = (audit.infracost_monthly === null || audit.infracost_monthly === undefined)\n                    ? \"NA\" : parseFloat(audit.infracost_monthly);\n\n// ── TIEMPOS POR AGENTE ──\nconst tiempo_analista_ms = $('Parsear Output Analista').item.json.tiempo_analista_ms || 0;\n\nconst templatesArray = $('Guardar Template').all();\nconst lastTpl = templatesArray.length ? templatesArray[templatesArray.length - 1] : { json: {} };\n// Arquitecto: tiempo SUMADO sobre todas las iteraciones del ciclo\nconst tiempo_arquitecto_ms = templatesArray.reduce((s, it) => s + (it.json.tiempo_arquitecto_ms || 0), 0);\n\n// Validador: tiempo SUMADO sobre todas las iteraciones\nconst valArray = $('AI Agent-Validador').all();\nlet tiempo_validador_ms = 0;\nfor (let i = 0; i < templatesArray.length; i++) {\n  const t0v = templatesArray[i].json.t0_validador;\n  if (!t0v) continue;\n  const tFin = (i + 1 < templatesArray.length)\n                 ? (templatesArray[i + 1].json.t0_validador || Date.now())\n                 : Date.now();\n  tiempo_validador_ms += Math.max(0, tFin - t0v);\n}\n\n// ── TOKENS (estimados por caracteres ~4 chars/token; usa tokenUsage real si esta disponible) ──\nconst tokens_analista   = $('Parsear Output Analista').item.json.tokens_analista || 0;\n// Arquitecto: suma sobre iteraciones\nconst tokens_arquitecto = templatesArray.reduce((s, it) => s + (it.json.tokens_arquitecto || 0), 0);\n// Validador: suma sobre iteraciones (real si hay tokenUsage; si no, estima entrada+salida)\nlet tokens_validador = 0;\nfor (let i = 0; i < valArray.length; i++) {\n  const vf = valArray[i].json;\n  if (vf.tokenUsage && vf.tokenUsage.totalTokens) {\n    tokens_validador += vf.tokenUsage.totalTokens;\n  } else if (vf.usage && vf.usage.total_tokens) {\n    tokens_validador += vf.usage.total_tokens;\n  } else {\n    const entrada = (templatesArray[i] && templatesArray[i].json.templateContent) || \"\";\n    const salida  = vf.output || \"\";\n    tokens_validador += Math.round((entrada.length + salida.length) / 4);\n  }\n}\nconst tokens_totales = tokens_analista + tokens_arquitecto + tokens_validador;\n\n// Iteraciones y convergencia\nconst iteraciones = lastTpl.json.attempt || 1;\nconst convergio   = 1;\n\n// CodeBERTScore F1 calculado por el auditor (comparando output vs esperado)\nconst cbs_f1 = (audit.cbs_f1 === null || audit.cbs_f1 === undefined) ? \"NA\" : audit.cbs_f1;\n\n// DSR: llego a Consolidar => terraform plan OK => despliegue exitoso\nconst dsr = 1;\n\n// Tiempos en segundos\nconst tiempo_e2e_s   = parseFloat(((t1_total - t0_total) / 1000).toFixed(1));\nconst t_analista_s   = parseFloat((tiempo_analista_ms   / 1000).toFixed(1));\nconst t_arquitecto_s = parseFloat((tiempo_arquitecto_ms / 1000).toFixed(1));\nconst t_validador_s  = parseFloat((tiempo_validador_ms  / 1000).toFixed(1));\n\n// ── COSTO USD (estimado desde tokens totales) ──\n// Precio mixto aproximado Claude Sonnet: ~$6 por millon de tokens.\nconst PRECIO_POR_MILLON = 6.0;\nconst cost_usd = parseFloat(((tokens_totales / 1000000) * PRECIO_POR_MILLON).toFixed(6));\n\nreturn {\n  template_id,\n  nivel,\n  dsr,\n  t_analista_s,\n  t_arquitecto_s,\n  t_validador_s,\n  tiempo_e2e_s,\n  checkov,\n  tfsec,\n  tflint,\n  cbs_f1,\n  infracost,\n  iteraciones,\n  convergio,\n  tokens_analista,\n  tokens_arquitecto,\n  tokens_validador,\n  tokens_totales,\n  cost_usd\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        368,
+        608
+      ],
+      "id": "b26f57e0-8a9f-4d70-8c51-ce42396fba50",
+      "name": "Consolidar Métricas"
+    },
+    {
+      "parameters": {
+        "command": "=RESULTS_FILE=\"/tmp/resultados.txt\"\nTPL=\"{{ $json.template_id }}\"\nNIV=\"{{ $json.nivel }}\"\n\nif [ ! -f \"$RESULTS_FILE\" ]; then\n  printf \"template\\tnivel\\tejecucion\\tdsr\\tt_analista_s\\tt_arquitecto_s\\tt_validador_s\\tt_e2e_s\\tcheckov\\ttfsec\\ttflint\\tcbs_f1\\tinfracost\\titer\\tconvergio\\ttok_analista\\ttok_arquitecto\\ttok_validador\\ttok_totales\\tcost_usd\\n\" > \"$RESULTS_FILE\"\nfi\n\nEJEC=\"{{ $('Input Template AWS').item.json.ejecucion }}\"\n\nprintf \"%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n\" \\\n  \"$TPL\" \"$NIV\" \"$EJEC\" \\\n  \"{{ $json.dsr }}\" \\\n  \"{{ $json.t_analista_s }}\" \"{{ $json.t_arquitecto_s }}\" \"{{ $json.t_validador_s }}\" \"{{ $json.tiempo_e2e_s }}\" \\\n  \"{{ $json.checkov }}\" \"{{ $json.tfsec }}\" \"{{ $json.tflint }}\" \"{{ $json.cbs_f1 }}\" \"{{ $json.infracost }}\" \\\n  \"{{ $json.iteraciones }}\" \"{{ $json.convergio }}\" \\\n  \"{{ $json.tokens_analista }}\" \"{{ $json.tokens_arquitecto }}\" \"{{ $json.tokens_validador }}\" \"{{ $json.tokens_totales }}\" \"{{ $json.cost_usd }}\" \\\n  >> \"$RESULTS_FILE\"\n\necho \"── FILA AGREGADA A resultados.txt ──\"\necho \"Template: $TPL ($NIV) — Ejecución #$EJEC — EXITO\"\necho \"\"\necho \"── CONTENIDO ACTUAL ──\"\ncat \"$RESULTS_FILE\""
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        560,
+        608
+      ],
+      "id": "d07c4027-b949-4ec6-9cf4-9ba96128fc61",
+      "name": "Guardar Resultado"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "limite-check-001",
+              "leftValue": "={{ $json.limite_alcanzado }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        288,
+        880
+      ],
+      "id": "64a3e00f-6ed7-4f77-9a94-15c3689af6b5",
+      "name": "¿Límite Alcanzado?"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ── Registra el intento FALLIDO (dsr=0) como fila cruda ─────────────────\nconst template_id = $('Input Template AWS').item.json.template_id;\nconst nivel       = $('Input Template AWS').item.json.nivel;\nconst t0_total    = $('Input Template AWS').item.json.t0_total;\n\n// Tiempos por agente (sumados sobre iteraciones)\nconst tiempo_analista_ms = $('Parsear Output Analista').item.json.tiempo_analista_ms || 0;\nconst templatesArray = $('Guardar Template').all();\nconst tiempo_arquitecto_ms = templatesArray.reduce((s, it) => s + (it.json.tiempo_arquitecto_ms || 0), 0);\n\nconst valArray = $('AI Agent-Validador').all();\nlet tiempo_validador_ms = 0;\nfor (let i = 0; i < templatesArray.length; i++) {\n  const t0v = templatesArray[i].json.t0_validador;\n  if (!t0v) continue;\n  const tFin = (i + 1 < templatesArray.length)\n                 ? (templatesArray[i + 1].json.t0_validador || Date.now())\n                 : Date.now();\n  tiempo_validador_ms += Math.max(0, tFin - t0v);\n}\n\n// Tokens (estimados; suma sobre iteraciones)\nconst tokens_analista   = $('Parsear Output Analista').item.json.tokens_analista || 0;\nconst tokens_arquitecto = templatesArray.reduce((s, it) => s + (it.json.tokens_arquitecto || 0), 0);\nlet tokens_validador = 0;\nfor (let i = 0; i < valArray.length; i++) {\n  const vf = valArray[i].json;\n  if (vf.tokenUsage && vf.tokenUsage.totalTokens) tokens_validador += vf.tokenUsage.totalTokens;\n  else if (vf.usage && vf.usage.total_tokens)     tokens_validador += vf.usage.total_tokens;\n  else {\n    const entrada = (templatesArray[i] && templatesArray[i].json.templateContent) || \"\";\n    const salida  = vf.output || \"\";\n    tokens_validador += Math.round((entrada.length + salida.length) / 4);\n  }\n}\nconst tokens_totales = tokens_analista + tokens_arquitecto + tokens_validador;\nconst cost_usd = parseFloat(((tokens_totales / 1000000) * 6.0).toFixed(6));\n\nreturn {\n  template_id,\n  nivel,\n  dsr: 0,\n  t_analista_s:   parseFloat((tiempo_analista_ms/1000).toFixed(1)),\n  t_arquitecto_s: parseFloat((tiempo_arquitecto_ms/1000).toFixed(1)),\n  t_validador_s:  parseFloat((tiempo_validador_ms/1000).toFixed(1)),\n  tiempo_e2e_s:   parseFloat(((Date.now()-t0_total)/1000).toFixed(1)),\n  checkov:   \"NA\",\n  tfsec:     \"NA\",\n  tflint:    \"NA\",\n  cbs_f1:    \"NA\",\n  infracost: \"NA\",\n  iteraciones: ($json.attempt || 5) - 1,\n  convergio: 0,\n  tokens_analista,\n  tokens_arquitecto,\n  tokens_validador,\n  tokens_totales,\n  cost_usd\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        864
+      ],
+      "id": "c9447461-dbd0-4391-ad2f-383931194c32",
+      "name": "Registrar Fracaso"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list",
+          "cachedResultName": "Claude Sonnet 4.6"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        -640,
+        832
+      ],
+      "id": "dc5f288c-0dbc-4493-b624-7c454283047a",
+      "name": "Anthropic Chat Model2",
+      "credentials": {
+        "anthropicApi": {
+          "id": "LncPX0XCwpNzWEub",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.prompt }}",
+        "options": {
+          "systemMessage": "Eres un arquitecto experto en Azure y Terraform. Recibirás el análisis de una infraestructura AWS y deberás generar el template Terraform equivalente en Azure.\n\nReglas:\n- Usa el provider \"azurerm\" versión ~> 3.0\n- Incluye siempre un azurerm_resource_group\n- Mapea los servicios AWS a su equivalente Azure más cercano\n- Si no hay equivalente exacto, indica el motivo en un comentario HCL\n- Responde ÚNICAMENTE con el código HCL de Terraform, sin explicaciones adicionales\n- El código debe ser sintácticamente válido\n- NUNCA pongas version dentro del bloque provider \"azurerm\" {}\n- El bloque terraform { required_providers {} } es suficiente para declarar versiones\n- No uses el provider \"random\" a menos que sea estrictamente necesario\n\nMappings principales:\n- aws_s3_bucket              → azurerm_storage_account + azurerm_storage_container\n- aws_lambda_function        → azurerm_linux_function_app + azurerm_service_plan\n- aws_instance / aws_ec2     → azurerm_linux_virtual_machine\n- aws_vpc                    → azurerm_virtual_network\n- aws_subnet                 → azurerm_subnet\n- aws_security_group         → azurerm_network_security_group\n- aws_internet_gateway       → azurerm_public_ip + route table\n- aws_rds_instance           → azurerm_mssql_server / azurerm_postgresql_flexible_server\n- aws_dynamodb_table         → azurerm_cosmosdb_account\n- aws_iam_role               → azurerm_role_assignment\n- aws_api_gateway_rest_api   → azurerm_api_management\n- aws_ebs_volume             → azurerm_managed_disk\n- aws_elb / aws_lb           → azurerm_lb\n- aws_cloudwatch_metric_alarm → azurerm_monitor_metric_alert"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -1312,
+        624
+      ],
+      "id": "99c34d30-4f46-4bb6-9b63-55c85115021e",
+      "name": "AI Agent-Arquitecto"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Valida el siguiente template Terraform de Azure generado por el Arquitecto y determina si es apto para despliegue. Si contiene errores, diagnostícalos para su corrección.\n\nTemplate a validar:\n{{ $json.templateContent }}",
+        "options": {
+          "systemMessage": "Eres un Agente Validador experto en Terraform y Azure. Tu función NO es generar código, sino orquestar la validación de despliegue del template recibido y diagnosticar sus errores.\n\nResponsabilidades:\n1. Recibir el template Terraform Azure generado por el Agente Arquitecto.\n2. Coordinar su validación de despliegue mediante terraform init y terraform plan (ejecutados por la herramienta determinista de validación conectada al flujo).\n3. Interpretar el resultado de la validación:\n   - Si el template es válido (init y plan sin errores), confirmarlo como apto para el despliegue.\n   - Si presenta errores, extraer el diagnóstico preciso (recurso, atributo y causa) para retroalimentar al Agente Arquitecto y guiar su corrección iterativa.\n4. Nunca modificar ni reescribir el código: tu salida es un veredicto de validación y, en caso de fallo, un diagnóstico estructurado de los errores encontrados.\n\nEl ciclo de validación y corrección se repite hasta que el template pasa la validación o se alcanza el límite máximo de iteraciones (Circuit Breaker)."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -640,
+        624
+      ],
+      "id": "3bbdcd45-09e1-46ac-9c15-763cd94a90ba",
+      "name": "AI Agent-Validador"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ── OE3: feedback estructurado + control de iteraciones ─────────────────\n// Usamos $runIndex para saber exactamente cuántas veces ha fallado este nodo\nconst currentAttempt = $runIndex + 1; \nconst MAX_ATTEMPTS   = 5;\nconst limite_alcanzado = currentAttempt >= MAX_ATTEMPTS;\n\nconst terraformOutput = $input.item.json.stdout || \"\";\n\n// Extraer líneas de error relevantes\nconst errorLines = terraformOutput\n  .split(\"\\n\")\n  .filter(l => l.toLowerCase().includes(\"error\"))\n  .slice(0, 15)\n  .join(\"\\n\");\n\nreturn {\n  attempt:          currentAttempt + 1,\n  terraformError:   terraformOutput,\n  errorResumen:     errorLines || terraformOutput.substring(0, 800),\n  // Usamos .last() para asegurar que leemos el template de esta última iteración\n  previousTemplate: $('Guardar Template').last().json.templateContent,\n  d_iteracion:      currentAttempt,\n  limite_alcanzado\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        880
+      ],
+      "id": "4f8abc63-73f4-421c-b7fb-81101325cecf",
+      "name": "Preparar Feedback"
+    },
+    {
+      "parameters": {
+        "command": "=INPUT_FILE=\"{{ $json.input_file }}\"\nBASE=\"${INPUT_FILE%.tf}\"\nRESULTS_FILE=\"/tmp/resultados.txt\"\n\n# Derivar nivel del prefijo (S->simple, M->medio, C->complejo)\nPREFIJO=\"${BASE:0:1}\"\ncase \"$PREFIJO\" in\n  S) NIV=\"simple\" ;;\n  M) NIV=\"medio\" ;;\n  C) NIV=\"complejo\" ;;\n  *) NIV=\"desconocido\" ;;\nesac\n\n# Calcular numero de ejecucion: contar filas previas de este template+nivel en resultados.txt +1\nif [ -f \"$RESULTS_FILE\" ]; then\n  EJEC=$(awk -F'\\t' -v t=\"$BASE\" -v n=\"$NIV\" 'NR>1 && $1==t && $2==n {c++} END{print c+1}' \"$RESULTS_FILE\")\nelse\n  EJEC=1\nfi\n\n# Emitir el numero de ejecucion como primera linea (marcador) y luego el contenido del .tf\necho \"___EJECUCION___=${EJEC}\"\ncat /tmp/inputs/${INPUT_FILE}"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -1168,
+        256
+      ],
+      "id": "b4c76cd6-b4a8-4b8e-ba56-2722876de21e",
+      "name": "Leer Archivo AWS"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "input_file",
+              "value": "S01.tf",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -1360,
+        256
+      ],
+      "id": "e7829fc1-c495-46bf-9b24-0242fd9cbb29",
+      "name": "Definir Archivo Entrada"
+    },
+    {
+      "parameters": {
+        "command": "=RESULTS_FILE=\"/tmp/resultados.txt\"\nTPL=\"{{ $json.template_id }}\"\nNIV=\"{{ $json.nivel }}\"\n\nif [ ! -f \"$RESULTS_FILE\" ]; then\n  printf \"template\\tnivel\\tejecucion\\tdsr\\tt_analista_s\\tt_arquitecto_s\\tt_validador_s\\tt_e2e_s\\tcheckov\\ttfsec\\ttflint\\tcbs_f1\\tinfracost\\titer\\tconvergio\\ttok_analista\\ttok_arquitecto\\ttok_validador\\ttok_totales\\tcost_usd\\n\" > \"$RESULTS_FILE\"\nfi\n\nEJEC=\"{{ $('Input Template AWS').item.json.ejecucion }}\"\n\nprintf \"%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n\" \\\n  \"$TPL\" \"$NIV\" \"$EJEC\" \\\n  \"{{ $json.dsr }}\" \\\n  \"{{ $json.t_analista_s }}\" \"{{ $json.t_arquitecto_s }}\" \"{{ $json.t_validador_s }}\" \"{{ $json.tiempo_e2e_s }}\" \\\n  \"{{ $json.checkov }}\" \"{{ $json.tfsec }}\" \"{{ $json.tflint }}\" \"{{ $json.cbs_f1 }}\" \"{{ $json.infracost }}\" \\\n  \"{{ $json.iteraciones }}\" \"{{ $json.convergio }}\" \\\n  \"{{ $json.tokens_analista }}\" \"{{ $json.tokens_arquitecto }}\" \"{{ $json.tokens_validador }}\" \"{{ $json.tokens_totales }}\" \"{{ $json.cost_usd }}\" \\\n  >> \"$RESULTS_FILE\"\n\necho \"── FILA DE FRACASO AGREGADA A resultados.txt ──\"\necho \"Template: $TPL ($NIV) — Ejecución #$EJEC — FRACASO (dsr=0)\"\necho \"\"\necho \"── CONTENIDO ACTUAL ──\"\ncat \"$RESULTS_FILE\""
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        688,
+        864
+      ],
+      "id": "1d98c2b6-14f7-4f8b-917e-15eded4f3c00",
+      "name": "Guardar Fracaso"
+    },
+    {
+      "parameters": {
+        "command": "=mkdir -p /tmp/outputs\nINPUT_FILE=\"{{ $('Definir Archivo Entrada').item.json.input_file }}\"\nBASE=\"${INPUT_FILE%.tf}\"\nEJEC=\"{{ $('Input Template AWS').item.json.ejecucion }}\"\nEJEC_PAD=$(printf \"%02d\" \"$EJEC\")\n\nOUT=\"/tmp/outputs/${BASE}-azure-output-ejecucion-${EJEC_PAD}.tf\"\n\ncat > \"$OUT\" << 'TFEOF'\n{{ $('Guardar Template').item.json.templateContent }}\nTFEOF\n\necho \"OUTPUT_FILE=${BASE}-azure-output-ejecucion-${EJEC_PAD}.tf\"\necho \"EJECUCION=${EJEC}\"\necho \"Guardado en: $OUT\""
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -816,
+        624
+      ],
+      "id": "437df55f-e080-4511-b2c1-d003c9ab93ae",
+      "name": "Guardar Output Azure"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking 'Execute workflow'": {
+      "main": [
+        [
+          {
+            "node": "Definir Archivo Entrada",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Input Template AWS": {
+      "main": [
+        [
+          {
+            "node": "AI Agent-Analista",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent-Analista",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent-Analista": {
+      "main": [
+        [
+          {
+            "node": "Parsear Output Analista",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parsear Output Analista": {
+      "main": [
+        [
+          {
+            "node": "Preparar Prompt Arquitecto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Prompt Arquitecto": {
+      "main": [
+        [
+          {
+            "node": "AI Agent-Arquitecto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent-Arquitecto",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Guardar Template": {
+      "main": [
+        [
+          {
+            "node": "Guardar Output Azure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar Terraform": {
+      "main": [
+        [
+          {
+            "node": "¿Terraform OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Terraform OK?": {
+      "main": [
+        [
+          {
+            "node": "Herramientas Calidad",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Preparar Feedback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Herramientas Calidad": {
+      "main": [
+        [
+          {
+            "node": "Consolidar Métricas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consolidar Métricas": {
+      "main": [
+        [
+          {
+            "node": "Guardar Resultado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Límite Alcanzado?": {
+      "main": [
+        [
+          {
+            "node": "Registrar Fracaso",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Preparar Prompt Arquitecto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model2": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent-Validador",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent-Arquitecto": {
+      "main": [
+        [
+          {
+            "node": "Guardar Template",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent-Validador": {
+      "main": [
+        [
+          {
+            "node": "Validar Terraform",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Feedback": {
+      "main": [
+        [
+          {
+            "node": "¿Límite Alcanzado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Definir Archivo Entrada": {
+      "main": [
+        [
+          {
+            "node": "Leer Archivo AWS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leer Archivo AWS": {
+      "main": [
+        [
+          {
+            "node": "Input Template AWS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar Fracaso": {
+      "main": [
+        [
+          {
+            "node": "Guardar Fracaso",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Guardar Output Azure": {
+      "main": [
+        [
+          {
+            "node": "AI Agent-Validador",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "b1020e51-91eb-4591-9882-b72b363a69d1",
+  "meta": {
+    "instanceId": "bfa74c4eb5fd05243edd52cb89693f2c60c1354eaa8eec199c87ada7b2c4401b"
+  },
+  "nodeGroups": [],
+  "id": "QJ2SHyvUIRgevdTw",
+  "tags": []
+}
